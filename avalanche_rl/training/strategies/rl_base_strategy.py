@@ -222,29 +222,55 @@ class RLBaseStrategy(BaseTemplate):
 
         # to compute timestep differences more efficiently
         ep_len_sum = [sum(self.ep_lengths[k]) for k in range(self.n_envs)]
+        # print(f"ep_len_sum: {ep_len_sum}")
 
         # reset environment on first run
-        if self._obs is None:
-            self._obs = env.reset()
+        if self._obs is None: 
+            self._obs = [env.reset() for env in self.environment]
+        
+        backup_task_label = self.task_label
+        for t in count(start=1): 
+            t_prime = t % len(self._obs)
+            # print(f"t: {t}, len(self._obs): {len(self._obs)}, t_prime: {t_prime}")
+            self.task_label = backup_task_label[t_prime]
+            print(f"rollout: self.task_label: {self.task_label}")
+            action = self.sample_rollout_action(self._obs[t_prime].to(self.device))
 
-        for t in count(start=1):
-            # sample action(s) from policy moving observation to device;
-            # actions of shape `n_envs`xA
-            action = self.sample_rollout_action(
-                self._obs.to(self.device))
-
-            # observations returned are one for each parallel environment  
-            next_obs, rewards, dones, info = env.step(action)
+            next_obs, rewards, dones, info = self.environment[t_prime].step(action)
 
             step_experiences.append(
-                Step(self._obs, action, dones, rewards, next_obs))
+                Step(self._obs[t_prime], action, dones, rewards, next_obs))
+            
             self.rollout_steps += 1
             # keep track of all rewards for parallel environments
             self.rewards['curr_returns'] += rewards.reshape(-1,)
 
-            self._obs = next_obs
+            self._obs[t_prime] = next_obs
+
+        # if self._obs is None:
+        #     self._obs = env.reset()
+
+        # for t in count(start=1):
+        #     # sample action(s) from policy moving observation to device;
+        #     # actions of shape `n_envs`xA
+        #     action = self.sample_rollout_action(
+        #         self._obs.to(self.device))
+
+        #     # observations returned are one for each parallel environment  
+        #     next_obs, rewards, dones, info = env.step(action)
+        #     print(f"next_obs: {next_obs}, rewards: {rewards}, dones: {dones}")
+
+        #     step_experiences.append(
+        #         Step(self._obs, action, dones, rewards, next_obs))
+        #     self.rollout_steps += 1
+        #     # keep track of all rewards for parallel environments
+        #     self.rewards['curr_returns'] += rewards.reshape(-1,)
+
+        #     self._obs = next_obs
 
             dones_idx = dones.reshape(-1, 1).nonzero()[0]
+            # print(f"dones_idx {dones_idx}")
+
             for env_done in dones_idx:
                 self.ep_lengths[env_done].append(
                     self.rollout_steps-ep_len_sum[env_done])
@@ -274,7 +300,8 @@ class RLBaseStrategy(BaseTemplate):
             if max_steps > 0 and n_rollouts <= 0 and t >= max_steps:
                 rollouts.append(Rollout(step_experiences, n_envs=self.n_envs))
                 break
-
+        
+        self.task_label = backup_task_label
         return rollouts
 
     def update(self, rollouts: List[Rollout]):
@@ -285,20 +312,22 @@ class RLBaseStrategy(BaseTemplate):
         # maintain vectorized env interface without parallel overhead
         # if `n_envs` is 1
         if self.n_envs == 1:
-            env = VectorizedEnvWrapper(self.environment, auto_reset=True)
+            envs = [VectorizedEnvWrapper(env, auto_reset=True) for env in self.environment]
+            # env = VectorizedEnvWrapper(self.environment, auto_reset=True)
         else:
-            import multiprocessing
-            cpus = min(self.n_envs, multiprocessing.cpu_count())
-            env = VectorizedEnvironment(
-                self.environment, self.n_envs, auto_reset=True,
-                wrappers_generators=None,
-                ray_kwargs={'num_cpus': cpus, 'num_gpus': 0})
+            raise NotImplementedError(f"Usupported feature for code modification")
+            # import multiprocessing
+            # cpus = min(self.n_envs, multiprocessing.cpu_count())
+            # env = VectorizedEnvironment(
+            #     self.environment, self.n_envs, auto_reset=True,
+            #     wrappers_generators=None,
+            #     ray_kwargs={'num_cpus': cpus, 'num_gpus': 0})
         # NOTE: `info['terminal_observation']`` is NOT converted to tensor 
-        return Array2Tensor(env)
+        return [Array2Tensor(env) for env in envs]
 
     def make_eval_env(self, **kwargs):
         # during evaluation we do not use a vectorized environment
-        return Array2Tensor(self.environment)
+        return [Array2Tensor(env) for env in self.environment]
 
     def train(self, experiences: Union[RLExperience, Sequence[RLExperience]],
               eval_streams: Optional[Sequence[Union
@@ -330,7 +359,10 @@ class RLBaseStrategy(BaseTemplate):
         return res
 
     def train_exp(self, experience: RLExperience, eval_streams, **kwargs):
+        # change this to experience.environments
         self.environment = experience.environment
+        self.task_label = experience.task_label
+
         self.n_envs = experience.n_envs
         # TODO:  keep track in default evaluator
         self.rollout_steps = 0
@@ -343,6 +375,7 @@ class RLBaseStrategy(BaseTemplate):
                         'past_returns': []}
 
         # Environment creation
+        # invoke the make_train_env for every environment in the self.environments list
         self.environment = self.make_train_env(**kwargs)
 
         # TODO
@@ -357,6 +390,7 @@ class RLBaseStrategy(BaseTemplate):
         for self.timestep in range(self.current_experience_steps.value):
             self._before_training_iteration(**kwargs)
             self.before_rollout(**kwargs)
+            # adjust the rollout to retrieve experiences from a set of environments
             self.rollouts = self.rollout(
                 env=self.environment, n_rollouts=self.rollouts_per_step,
                 max_steps=self.max_steps_per_rollout)
@@ -388,7 +422,9 @@ class RLBaseStrategy(BaseTemplate):
             self._periodic_eval(eval_streams, do_final=False)
 
         self.total_steps += self.rollout_steps
-        self.environment.close()
+        for env in self.environment:
+            env.close()
+        # self.environment.close()
 
         # Final evaluation
         self._periodic_eval(eval_streams, do_final=(
@@ -439,11 +475,13 @@ class RLBaseStrategy(BaseTemplate):
         self._before_eval(**kwargs)
         for self.experience in exp_list:
             self.environment = self.experience.environment
+            # print(f"self.environment: {self.environment}")
             # only single env supported during evaluation
             self.n_envs = self.experience.n_envs
 
             # Create test Environment
             self.environment = self.make_eval_env(**kwargs)
+            # print(f"_before_eval after make_eval_env -> self.environment: {self.environment}")
 
             # Model Adaptation (e.g. freeze/add new units)
             # self.model_adaptation()
@@ -467,18 +505,26 @@ class RLBaseStrategy(BaseTemplate):
         # TODO: evaluate on self.eval_episodes parallel environments at once
         # (evaluate_exp_parallel function)
         for ep_no in range(self.eval_episodes):
+            # print(f"ep_no: {ep_no}")
             self._before_eval_iteration(**kwargs)
-            obs = self.environment.reset()
+            obs = [env.reset() for env in self.environment]
+            # print(f"obs: {obs}")
             for t in count(start=1):
+                t_prime = t % len(obs)
+
                 # TODO: this may get stuck with games such as breakout and
                 # deterministic dqn if we let no op action be selected
                 # indefinitely
                 self._before_eval_forward(**kwargs) 
+                # print(f"kwargs: {kwargs}")
+                # print(f"obs[t_prime].unsqueeze(0): {obs[t_prime].unsqueeze(0)}")
                 action = self.model.get_action(
-                    obs.unsqueeze(0).to(self.device),
-                    task_label=self.experience.task_label)
+                    obs[t_prime].unsqueeze(0).to(self.device),
+                    task_label=self.experience.task_label[t_prime])
                 self._after_eval_forward(**kwargs)
-                obs, reward, done, info = self.environment.step(action.item())
+                next_obs, reward, done, info = self.environment[t_prime].step(action.item())
+                obs[t_prime] = next_obs
+
                 # TODO: use info
                 self.eval_rewards['past_returns'][ep_no] += reward
                 if done:
@@ -488,8 +534,11 @@ class RLBaseStrategy(BaseTemplate):
             self.eval_ep_lengths[0].append(t)
 
         # needed if env comes from train stream and is thus shared
-        self.environment.reset()
-        self.environment.close()
+        for env in self.environment:
+            env.reset()
+        
+        for env in self.environment:
+            env.close()
 
     def _model_forward(self, model: nn.Module, observations: torch.Tensor,
                        *args, **kwargs):
@@ -510,6 +559,10 @@ class RLBaseStrategy(BaseTemplate):
         task_label = None
         if exp is not None:
             task_label = exp.task_label
+
+        # print(f"_model_forward: self.task_label: {self.task_label}")
+        if self.task_label is not None: 
+            task_label = self.task_label
 
         self._before_forward(**kwargs)
         output = model(observations, *args, **kwargs, task_label=task_label)

@@ -1,8 +1,9 @@
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
+
+from typing import Union, List, Dict, Tuple
 from torch.distributions import Categorical
-from typing import List, Union
 
 
 class A2CModel(nn.Module):
@@ -71,6 +72,77 @@ class ActorCriticMLP(A2CModel):
             value = self.critic(state)
         if compute_policy:
             policy_logits = self.actor(state)
+
+        return value, policy_logits
+
+class MultiEnvActorCriticMLP(A2CModel):
+    def __init__(
+        self,
+        task_id_to_model_shape: Dict[int, Tuple[int, int]],
+        actor_hidden_sizes: Union[int, List[int]] = [64, 64],
+        critic_hidden_sizes: Union[int, List[int]] = [64, 64],
+        activation_type: str = 'relu'
+    ):
+        super(MultiEnvActorCriticMLP, self).__init__()
+
+        if isinstance(actor_hidden_sizes, int):
+            actor_hidden_sizes = [actor_hidden_sizes]
+        if isinstance(critic_hidden_sizes, int):
+            critic_hidden_sizes = [critic_hidden_sizes]
+
+        if activation_type == 'relu':
+            self.activation = nn.ReLU()
+        elif activation_type == 'tanh':
+            self.activation = nn.Tanh()
+        else:
+            raise ValueError(f"Unknown activation type: {activation_type}")
+
+        self.task_id_to_model_shape = task_id_to_model_shape
+
+        # Shared layers
+        self.shared_critic_hidden = nn.ModuleList(
+            [nn.Linear(critic_hidden_sizes[i], critic_hidden_sizes[i + 1])
+             for i in range(len(critic_hidden_sizes) - 1)]
+        )
+        self.shared_actor_hidden = nn.ModuleList(
+            [nn.Linear(actor_hidden_sizes[i], actor_hidden_sizes[i + 1])
+             for i in range(len(actor_hidden_sizes) - 1)]
+        )
+
+        # Task-specific layers stored in ModuleDict
+        self.task_specific_critics = nn.ModuleDict()
+        self.task_specific_actors = nn.ModuleDict()
+
+        for task_id, (input_size, num_actions) in task_id_to_model_shape.items():
+            self.task_specific_critics[task_id] = self._build_task_specific_layer(
+                input_size, num_actions, self.shared_critic_hidden)
+            self.task_specific_actors[task_id] = self._build_task_specific_layer(
+                input_size, num_actions, self.shared_actor_hidden)
+
+    def _build_task_specific_layer(self, input_size: int, num_actions: int, shared_hidden: nn.ModuleList):
+        layers = [nn.Linear(input_size, shared_hidden[0].in_features), self.activation]
+        layers += [layer for layer in shared_hidden]
+        layers.append(nn.Linear(shared_hidden[-1].out_features, num_actions))
+        return nn.Sequential(*layers)
+
+    def forward(
+        self,
+        state: torch.Tensor,
+        task_label: str = None,
+        compute_policy=True,
+        compute_value=True
+    ):
+        if task_label not in self.task_id_to_model_shape: 
+            raise ValueError(f"Task ID {task_label} not found in task_id_to_model_shape mapping")
+
+        critic = self.task_specific_critics[task_label]
+        actor = self.task_specific_actors[task_label]
+
+        value, policy_logits = None, None
+        if compute_value:
+            value = critic(state)
+        if compute_policy:
+            policy_logits = actor(state)
 
         return value, policy_logits
 

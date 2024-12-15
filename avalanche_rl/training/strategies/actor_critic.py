@@ -65,7 +65,11 @@ class A2CStrategy(RLBaseStrategy):
     def update(self, rollouts: List[Rollout]):
         # perform gradient step(s) over gathered rollouts
         self.loss = 0.
-        for rollout in rollouts:
+        backup_task_label = self.task_label
+        for t, rollout in enumerate(rollouts):
+            t_prime = t % len(backup_task_label)
+            self.task_label = backup_task_label[t_prime]
+
             # move samples to device for processing and expect tensor of shape
             # `timesteps`x`n_envs`xD`
             rollout = rollout.to(self.device)
@@ -101,3 +105,5 @@ class A2CStrategy(RLBaseStrategy):
 
             # accumulate gradients for multi-rollout case
             self.loss += self.ac_w * policy_loss + self.cr_w * value_loss
+
+        self.task_label = backup_task_label

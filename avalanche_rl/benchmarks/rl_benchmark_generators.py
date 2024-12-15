@@ -47,8 +47,13 @@ def gym_benchmark_generator(
         n_experiences=None,
         env_wrappers: Union[Callable[[Any], Wrapper], List[Callable[[
             Any], Wrapper]], Dict[str, List[Callable[[Any], Wrapper]]]] = None,
-        envs_ids_to_sample_from: List[str] = None, *args, **kwargs) \
+        envs_ids_to_sample_from: List[str] = None, 
+          # ---- my code
+        environments_in_exps = None, 
+        *args, **kwargs) \
             -> RLScenario:
+
+      
     """
     Generates a RL benchmark with the provided options.
     You can build a benchmark by either passing a sequence of registered env_ids
@@ -112,6 +117,7 @@ def gym_benchmark_generator(
         wrappers: Dict[str, List[Wrapper]] = env_wrappers
 
     # three ways to create environments from gym
+    # envs_ -> by position we can index them
     if env_names is not None and len(env_names):
         envs_ = [
                  make_env(
@@ -157,13 +163,13 @@ def gym_benchmark_generator(
 
     # envs will be cycled through if n_experiences > len(envs_) otherwise
     # only the first n will be used
-    n_experiences = n_experiences or len(envs_)         
-    if n_experiences < len(envs_):
-        envs_ = envs_[:n_experiences]
-    elif n_experiences > len(envs_):
-        # cycle through envs sequentially, referencing same object
-        for i in range(n_experiences - len(envs_)):
-            envs_.append(envs_[i % len(envs_)])       
+    # n_experiences = n_experiences or len(envs_)         
+    # if n_experiences < len(envs_):
+    #     envs_ = envs_[:n_experiences]
+    # elif n_experiences > len(envs_):
+    #     # cycle through envs sequentially, referencing same object
+    #     for i in range(n_experiences - len(envs_)):
+    #         envs_.append(envs_[i % len(envs_)])       
     
     # # per_experience_episodes variable number of episodes depending on env
     # if type(per_experience_episodes) is list:
@@ -171,6 +177,8 @@ def gym_benchmark_generator(
 
     return RLScenario(envs=envs_, n_parallel_envs=n_parallel_envs, 
                       eval_envs=eval_envs, wrappers_generators=wrappers,
+                      environments_in_exps=environments_in_exps,
+                      env_names=env_names,
                       *args, **kwargs)
 
 
